@@ -40,7 +40,7 @@ import zipfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from fdc_foodservice_suppliers import normalize  # noqa: E402
+from fdc_foodservice_suppliers import is_distributor, normalize  # noqa: E402
 
 # Canonical US retailer -> regex matched against a lower-cased store name.
 # Banners are kept separate from their parent (Ralphs != Kroger) because
@@ -151,6 +151,51 @@ def _country(tag: str) -> str:
     return tag[3:].replace("-", " ").title()
 
 
+# Fallback indexes built from Open Food Facts: key -> [items, stores Counter,
+# countries Counter]. Used for brand owners with no exact barcode match.
+INDEX: dict[str, dict[str, list]] = {"prefix": {}, "owner": {}, "brand": {}}
+
+GENERIC_BRANDS = {
+    "ORGANIC", "NATURAL", "CLASSIC", "ORIGINAL", "PREMIUM", "SELECT", "FRESH",
+    "HOMESTYLE", "DELUXE", "GOURMET", "SIGNATURE", "CHOICE", "BEST", "GOLD",
+    "FAMILY", "FARM", "FARMS", "KITCHEN", "BAKERY", "FOODS", "FOOD", "BRAND",
+    "BRANDS", "SPECIAL", "QUALITY", "VALUE", "HOME", "TRADITIONAL", "PURE",
+    "SIMPLE", "SIMPLY", "HEALTHY", "LITE", "LIGHT", "SNACKS", "UNKNOWN",
+    "NOT A BRANDED ITEM", "NO BRAND", "UNBRANDED", "GENERIC", "PRIVATE LABEL",
+    "BAKEHOUSE", "CUCINA", "SELECT FARMS", "BONE BROTH", "GARDEN", "ORCHARD",
+}
+
+
+def usable_brand(nb: str) -> bool:
+    # Single-word brands need >= 8 letters: short ones ("ALPHA", "NAPOLI",
+    # "GLENS") collide with unrelated brands abroad.
+    if " " not in nb and len(nb) < 8:
+        return False
+    return (len(nb) >= 4 and re.search(r"[A-Z]", nb) is not None
+            and nb not in GENERIC_BRANDS and not is_distributor(nb))
+
+
+def prefix(k: str) -> str:
+    """First 8 digits of the EAN-13 form: country/number-system + company
+    prefix. Skips short codes and restricted-circulation ranges (in-store,
+    variable weight, coupons)."""
+    if len(k) < 10 or not k.isdigit():
+        return ""
+    e = k.zfill(14)[1:]
+    if e[0] == "2" or e[:2] in ("02", "04", "05", "99"):
+        return ""
+    return e[:8]
+
+
+def _add(index: dict, k: str, hit) -> None:
+    if not k:
+        return
+    e = index.setdefault(k, [0, collections.Counter(), collections.Counter()])
+    e[0] += 1
+    e[1].update(hit[0])
+    e[2].update(hit[1])
+
+
 def load_off(path: Path):
     """barcode -> (set of retailer keys, set of countries), plus key -> display name.
 
@@ -163,6 +208,7 @@ def load_off(path: Path):
         header = f.readline().rstrip("\n").split("\t")
         i_code, i_stores = header.index("code"), header.index("stores")
         i_ctry = header.index("countries_tags")
+        i_brands, i_owner = header.index("brands"), header.index("brand_owner")
         for n, line in enumerate(f, 1):
             if n % 1_000_000 == 0:
                 print(f"  OFF {n:,} rows", file=sys.stderr)
@@ -188,9 +234,20 @@ def load_off(path: Path):
             if not stores:
                 continue
             ctry = {c for t in parts[i_ctry].split(",") if (c := _country(t))}
-            st, cs = out.setdefault(key(code), (set(), set()))
+            k = key(code)
+            st, cs = out.setdefault(k, (set(), set()))
             st.update(stores)
             cs.update(ctry)
+            hit = (stores, ctry)
+            pre = prefix(k)
+            if pre:
+                _add(INDEX["prefix"], pre, hit)
+            if len(parts) > i_owner and parts[i_owner].strip():
+                _add(INDEX["owner"], normalize(parts[i_owner]), hit)
+            for b in parts[i_brands].split(","):
+                nb = normalize(b)
+                if usable_brand(nb):
+                    _add(INDEX["brand"], nb, hit)
     display = {k: c.most_common(1)[0][0] for k, c in spellings.items()}
     return out, display
 
@@ -206,21 +263,57 @@ def match_usda(usda_zip: Path, off):
     retailers: dict[str, collections.Counter] = collections.defaultdict(collections.Counter)
     countries: dict[str, collections.Counter] = collections.defaultdict(collections.Counter)
     seen: set[tuple[str, str]] = set()   # same GTIN appears in several FDC releases
+    prefix_owners: dict[str, set[str]] = collections.defaultdict(set)
+    brand_owners: dict[str, set[str]] = collections.defaultdict(set)
+    owners: set[str] = set()
     for row in reader:
         if row["discontinued_date"] or row["data_source"] == "NZGDSN":
             continue
         k = key(row["gtin_upc"] or "")
+        norm = normalize(row["brand_owner"] or "")
+        if norm:
+            owners.add(norm)
+            pre = prefix(k)
+            if pre:
+                prefix_owners[pre].add(norm)
+            nb = normalize(row["brand_name"] or "")
+            if usable_brand(nb):
+                brand_owners[nb].add(norm)
         hit = off.get(k)
         if not hit:
             continue
-        norm = normalize(row["brand_owner"] or "")
         if (norm, k) in seen:
             continue
         seen.add((norm, k))
         matched[norm] += 1
         retailers[norm].update(hit[0])
         countries[norm].update(hit[1])
-    return matched, retailers, countries
+    method = {o: "barcode" for o in matched}
+
+    LEVEL_INDEX = {"company prefix": "prefix", "brand owner name": "owner",
+                   "brand name": "brand"}
+    # Fallbacks, strongest first, only for owners with no barcode match.
+    # A prefix or brand is used only when exactly one USDA owner has it.
+    def apply(level: str, pairs):
+        for owner, k in pairs:
+            if owner in matched and method.get(owner) != level:
+                continue
+            e = INDEX[LEVEL_INDEX[level]].get(k)
+            if not e:
+                continue
+            method[owner] = level
+            matched[owner] += e[0]
+            for st in e[1]:
+                retailers[owner][st] += e[1][st]
+            for c in e[2]:
+                countries[owner][c] += e[2][c]
+
+    apply("company prefix", ((next(iter(o)), p) for p, o in prefix_owners.items()
+                             if len(o) == 1))
+    apply("brand owner name", ((o, o) for o in owners))
+    apply("brand name", ((next(iter(o)), b) for b, o in brand_owners.items()
+                         if len(o) == 1))
+    return matched, retailers, countries, method
 
 
 def main():
@@ -239,7 +332,7 @@ def main():
     off, display = load_off(args.off)
     print(f"  {len(off):,} barcodes with at least one store", file=sys.stderr)
     print("Matching USDA products by barcode...", file=sys.stderr)
-    matched, retailers, countries = match_usda(args.usda_zip, off)
+    matched, retailers, countries, method = match_usda(args.usda_zip, off)
 
     with open(args.brands, newline="", encoding="utf-8") as f:
         rows = list(csv.DictReader(f))
@@ -253,6 +346,10 @@ def main():
         intl = [(k, v) for k, v in intl
                 if not (own and (own in k or k in own) and len(k) > 3)]
         fmt = lambda pairs: "; ".join(f"{display[k]} ({v})" for k, v in pairs)
+        r["match_method"] = method.get(norm, "")
+        r["match_confidence"] = {"barcode": "high", "company prefix": "medium",
+                                 "brand owner name": "medium",
+                                 "brand name": "low"}.get(r["match_method"], "")
         r["off_matched_items"] = matched.get(norm, 0)
         r["retailer_count"] = len(c)
         r["us_retailer_count"] = len(us)
@@ -274,7 +371,8 @@ def main():
     hit = sum(1 for r in rows if int(r["retailer_count"]))
     us_hit = sum(1 for r in rows if int(r["us_retailer_count"]))
     print(f"{hit:,} of {len(rows):,} brand owners have at least one known retailer "
-          f"({us_hit:,} with a US retailer). "
+          f"({us_hit:,} with a US retailer). By method: "
+          f"{dict(collections.Counter(r['match_method'] for r in rows if r['match_method']))}. "
           f"Wrote {args.out} and {out_csv}", file=sys.stderr)
 
 
@@ -330,8 +428,13 @@ def write_xlsx(path: Path, rows, retailers, display, countries):
     for k, v in [
         ("Source", "Open Food Facts product dump (crowd-sourced 'stores' field), "
                    "matched to USDA Branded Foods by barcode."),
-        ("off_matched_items", "Products of this brand owner found in Open Food Facts "
-                              "with at least one US retailer."),
+        ("match_method", "barcode = exact barcode match (strongest); company prefix = "
+                         "another product with the same GS1 company prefix; brand owner "
+                         "name / brand name = same normalized name in Open Food Facts. "
+                         "Prefix and brand matches are used only when exactly one USDA "
+                         "brand owner has that prefix or brand, and only for owners with "
+                         "no barcode match."),
+        ("off_matched_items", "Open Food Facts products with store data behind this row."),
         ("us_retailers", "US chains, canonical names (number of this owner's products seen there)."),
         ("other_retailers", "All other stores worldwide, merged case/punctuation-insensitively "
                             "(top 40)."),

@@ -49,8 +49,14 @@ python3 off_retailers.py --usda-zip FoodData_Central_branded_food_csv_YYYY-MM-DD
     --brands output/all_brand_owners.csv --out output/brand_owners_with_retailers.xlsx
 ```
 
+Matching runs strongest first: exact barcode, then the same GS1 company
+prefix, then the same brand-owner name, then the same brand name. Prefix and
+brand matches are used only when exactly one USDA owner has that prefix or
+brand, and only for owners with no barcode match. `match_confidence` shows
+high, medium or low.
+
 It adds `us_retailers` (US chains with canonical names, e.g. Walmart or H-E-B),
 `other_retailers` (stores worldwide), `countries`, retailer and country counts,
 and Y/N flags for Walmart, Kroger, Costco, Target and Whole Foods. Coverage is
-thin, about 900 of 34K brand owners: a blank means nobody logged the store,
+thin, about 2,100 of 34K brand owners: a blank means nobody logged the store,
 not that the brand isn't sold there.
