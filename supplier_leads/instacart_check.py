@@ -85,6 +85,8 @@ def is_match(item_brand: str, item_name: str, keys: set[str]) -> bool:
     for k in keys:
         if b and (b == k or b.startswith(k + " ") or k.startswith(b + " ")):
             return True
+        if b and b.replace(" ", "") == k.replace(" ", ""):   # GOOD SENSE ~ GOODSENSE
+            return True
         if len(k) >= 5 and f" {k} " in name and b and (b in k or k in b):
             return True
     return False
