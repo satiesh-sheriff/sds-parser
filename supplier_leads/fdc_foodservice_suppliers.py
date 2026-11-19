@@ -122,6 +122,14 @@ def is_distributor(norm: str) -> bool:
     return any(f" {d} " in padded for d in DISTRIBUTORS)
 
 
+def basic_clean(name: str) -> str:
+    """Upper-case and strip punctuation, but keep words like US/INC, so
+    "US Foods, Inc." is still recognisable as a distributor."""
+    name = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode()
+    name = re.sub(r"['\u2019`]", "", name).upper().replace("&", " AND ")
+    return re.sub(r"\s+", " ", re.sub(r"[^A-Z0-9 ]+", " ", name)).strip()
+
+
 # Categories where a 1-gallon pack is a normal retail size (milk, juice...).
 RETAIL_GALLON_CATS = re.compile(
     r"milk|water|soda|juice|drink|beverage|tea|coffee|ice cream", re.I)
@@ -265,7 +273,8 @@ def to_rows(owners: dict[str, Owner], include_all: bool, gdsn_only: bool = False
             "sample_gtin": o.fs_gtin or o.sample_gtin,
             "name_variants": top(o.names, 4),
         }
-        (distributors if is_distributor(norm) else prospects).append(row)
+        dist = is_distributor(norm) or any(is_distributor(basic_clean(n)) for n in o.names)
+        (distributors if dist else prospects).append(row)
     key = lambda r: (r["tier"], -r["score"], -r["active_items"])
     return sorted(prospects, key=key), sorted(distributors, key=key)
 
