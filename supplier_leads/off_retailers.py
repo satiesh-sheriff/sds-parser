@@ -34,6 +34,7 @@ import collections
 import csv
 import gzip
 import io
+import json
 import re
 import sys
 import zipfile
@@ -59,6 +60,10 @@ US_RETAILERS = {
     "Fry's": r"^fry'?s( food)?$",
     "Smith's": r"^smith'?s( food)?",
     "Harris Teeter": r"^harris teeter",
+    "Mariano's": r"^mariano'?s",
+    "Woodman's": r"^woodman'?s",
+    "Tony's Fresh Market": r"^tony'?s fresh",
+    "Festival Foods": r"^festival foods",
     "Meijer": r"^meijer",
     "H-E-B": r"^(h-?e-?b|heb)( plus!?)?$|^central market$",
     "Costco": r"^costco",
@@ -130,6 +135,12 @@ def canonical(store: str) -> str | None:
         if rx.search(s):
             return name
     return None
+
+
+def instacart_name(slug: str) -> str:
+    """Instacart retailer slug -> canonical US retailer name where known."""
+    text = re.sub(r"-(corp|us|inc)$", "", slug).replace("-", " ")
+    return canonical(text) or text.title()
 
 
 def key(code: str) -> str:
@@ -326,7 +337,15 @@ def main():
                     help="CSV written by fdc_foodservice_suppliers.py (needs normalized_name)")
     ap.add_argument("--out", type=Path,
                     default=Path("output/brand_owners_with_retailers.xlsx"))
+    ap.add_argument("--instacart", type=Path,
+                    help="JSONL results from instacart_check.py to merge in")
     args = ap.parse_args()
+    instacart = {}
+    if args.instacart and args.instacart.exists():
+        for line in args.instacart.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                rec = json.loads(line)
+                instacart[rec["normalized_name"]] = rec
 
     print("Loading Open Food Facts store data...", file=sys.stderr)
     off, display = load_off(args.off)
@@ -338,8 +357,24 @@ def main():
         rows = list(csv.DictReader(f))
     for r in rows:
         norm = r["normalized_name"]
-        c = retailers.get(norm, collections.Counter())
+        c = collections.Counter(retailers.get(norm, collections.Counter()))
         cc = countries.get(norm, collections.Counter())
+        ins = instacart.get(norm)
+        ins_names = []
+        if ins and ins["on_instacart"] == "Y":
+            for slug in ins["retailers"]:
+                name = instacart_name(slug)
+                k = "US:" + name
+                display.setdefault(k, name)
+                c[k] += max(1, int(ins.get("matching_results") or 1))
+                ins_names.append(name)
+            if not method.get(norm):
+                method[norm] = "instacart search"
+            if "United States" not in cc:
+                cc = collections.Counter(cc)
+                cc["United States"] += 1
+            retailers[norm] = c
+            countries[norm] = cc
         us = [(k, v) for k, v in c.most_common() if k.startswith("US:")]
         intl = [(k, v) for k, v in c.most_common() if not k.startswith("US:")]
         own = _store_key(norm)
@@ -348,8 +383,10 @@ def main():
         fmt = lambda pairs: "; ".join(f"{display[k]} ({v})" for k, v in pairs)
         r["match_method"] = method.get(norm, "")
         r["match_confidence"] = {"barcode": "high", "company prefix": "medium",
-                                 "brand owner name": "medium",
-                                 "brand name": "low"}.get(r["match_method"], "")
+                                 "brand owner name": "medium", "brand name": "low",
+                                 "instacart search": "high"}.get(r["match_method"], "")
+        r["instacart_checked"] = ins["on_instacart"] if ins else ""
+        r["instacart_retailers"] = "; ".join(ins_names)
         r["off_matched_items"] = matched.get(norm, 0)
         r["retailer_count"] = len(c)
         r["us_retailer_count"] = len(us)
@@ -435,6 +472,10 @@ def write_xlsx(path: Path, rows, retailers, display, countries):
                          "brand owner has that prefix or brand, and only for owners with "
                          "no barcode match."),
         ("off_matched_items", "Open Food Facts products with store data behind this row."),
+        ("instacart_checked", "Y = brand found on Instacart (Apify search, one ZIP code); "
+                              "N = searched but not found; blank = not searched yet."),
+        ("instacart_retailers", "Chains where the brand appeared in Instacart search. "
+                                "These are also added to us_retailers."),
         ("us_retailers", "US chains, canonical names (number of this owner's products seen there)."),
         ("other_retailers", "All other stores worldwide, merged case/punctuation-insensitively "
                             "(top 40)."),
