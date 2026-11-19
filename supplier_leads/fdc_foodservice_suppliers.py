@@ -101,9 +101,17 @@ PW_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(FL OZ|[A-Z]+)", re.I)
 def normalize(name: str) -> str:
     name = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode()
     name = re.sub(r"['\u2019`]", "", name)          # SAM'S -> SAMS
+    name = re.sub(r"\d{8,}", " ", name)               # embedded GLN/GTIN codes
     n = re.sub(r"[^A-Z0-9 ]+", " ", name.upper().replace("&", " AND "))
     n = SUFFIXES.sub(" ", n)
-    return re.sub(r"\s+", " ", n).strip()
+    n = re.sub(r"\s+", " ", n).strip()
+    return ALIASES.get(n, n)
+
+
+# Known mangled spellings in the source data -> canonical normalized name.
+ALIASES = {
+    "SOCIT DES PRODUITS NESTL S A": "SOCIETE DES PRODUITS NESTLE S A",
+}
 
 
 def is_distributor(norm: str) -> bool:
@@ -195,7 +203,9 @@ def aggregate(zip_path: Path) -> tuple[dict[str, Owner], str]:
             o.categories[row["branded_food_category"].strip()] += 1
         o.items += 1
         channel = row["trade_channel"] or ""
-        if row["data_source"] in ("GDSN", "NZGDSN"):
+        if row["data_source"] == "NZGDSN":   # New Zealand/Australia market
+            continue
+        if row["data_source"] == "GDSN":
             o.gdsn += 1
         if "FOOD_SERVICE" in channel:
             o.fs += 1
@@ -225,11 +235,14 @@ def top(c: collections.Counter, n: int) -> str:
     return "; ".join(k for k, _ in c.most_common(n))
 
 
-def to_rows(owners: dict[str, Owner], include_all: bool):
+def to_rows(owners: dict[str, Owner], include_all: bool, gdsn_only: bool = False):
     prospects, distributors = [], []
     for norm, o in owners.items():
         t = tier(o)
-        if t == "C" and not include_all:
+        if gdsn_only:
+            if not o.gdsn:
+                continue
+        elif t == "C" and not include_all:
             continue
         row = {
             "company": o.names.most_common(1)[0][0],
@@ -316,11 +329,13 @@ def main():
                      help="download latest release into the current directory")
     ap.add_argument("--out", type=Path, default=Path("foodservice_suppliers.xlsx"))
     ap.add_argument("--all", action="store_true", help="include tier C")
+    ap.add_argument("--gdsn", action="store_true",
+                    help="every company with at least one GDSN item, any tier or category")
     args = ap.parse_args()
 
     zip_path = args.zip or download(Path("fdc_branded_food.zip"))
     owners, release = aggregate(zip_path)
-    prospects, distributors = to_rows(owners, args.all)
+    prospects, distributors = to_rows(owners, args.all, args.gdsn)
     write_xlsx(args.out, prospects, distributors, release)
     with open(args.out.with_suffix(".csv"), "w", newline="", encoding="utf-8") as f:
         if prospects:

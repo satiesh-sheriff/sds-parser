@@ -11,6 +11,9 @@ pip install openpyxl
 python3 fdc_foodservice_suppliers.py --download          # fetch latest release (~450 MB)
 python3 fdc_foodservice_suppliers.py --zip FoodData_Central_branded_food_csv_YYYY-MM-DD.zip \
     --out output/foodservice_suppliers.xlsx [--all]
+
+# Every US company that syncs item data through GDSN, any category:
+python3 fdc_foodservice_suppliers.py --zip ... --gdsn --out output/gdsn_suppliers.xlsx
 ```
 
 Runs in about 20 seconds once downloaded. Writes an `.xlsx` (Prospects, Distributor
@@ -25,6 +28,10 @@ private label, Method sheets) and a `.csv` of prospects.
 `gdsn_status = Not in GDSN` marks companies with foodservice-size packs that
 don't sync item data electronically. They're the most likely to need an
 EDI / item-setup solution.
+
+`--gdsn` keeps every brand owner with at least one US GDSN item, regardless of
+tier or category (New Zealand/Australia `NZGDSN` rows are dropped). Tier is
+still shown so you can sort.
 
 Caveats: brand owner is the label owner, not always the manufacturer
 (co-packers are hidden), and appearing here means the company sells into
