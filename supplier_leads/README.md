@@ -36,3 +36,21 @@ still shown so you can sort.
 Caveats: brand owner is the label owner, not always the manufacturer
 (co-packers are hidden), and appearing here means the company sells into
 foodservice, not specifically to US Foods.
+
+## Retailers (US and worldwide)
+
+`off_retailers.py` adds which stores carry each brand by matching USDA barcodes
+to the crowd-sourced `stores` field in the Open Food Facts dump
+(https://static.openfoodfacts.org/data/en.openfoodfacts.org.products.csv.gz, ~1.5 GB).
+
+```bash
+python3 off_retailers.py --usda-zip FoodData_Central_branded_food_csv_YYYY-MM-DD.zip \
+    --off en.openfoodfacts.org.products.csv.gz \
+    --brands output/all_brand_owners.csv --out output/brand_owners_with_retailers.xlsx
+```
+
+It adds `us_retailers` (US chains with canonical names, e.g. Walmart or H-E-B),
+`other_retailers` (stores worldwide), `countries`, retailer and country counts,
+and Y/N flags for Walmart, Kroger, Costco, Target and Whole Foods. Coverage is
+thin, about 900 of 34K brand owners: a blank means nobody logged the store,
+not that the brand isn't sold there.

@@ -99,12 +99,15 @@ PW_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(FL OZ|[A-Z]+)", re.I)
 
 
 def normalize(name: str) -> str:
+    raw = name
     name = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode()
     name = re.sub(r"['\u2019`]", "", name)          # SAM'S -> SAMS
     name = re.sub(r"\d{8,}", " ", name)               # embedded GLN/GTIN codes
     n = re.sub(r"[^A-Z0-9 ]+", " ", name.upper().replace("&", " AND "))
     n = SUFFIXES.sub(" ", n)
     n = re.sub(r"\s+", " ", n).strip()
+    if not n:   # owner listed only as a code (e.g. a GLN): keep the code
+        n = re.sub(r"\s+", " ", raw.strip().upper())
     return ALIASES.get(n, n)
 
 
